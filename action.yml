@@ -1,13 +1,240 @@
-name: 'Custom Action Template'
+name: 'Checkmarx SAST Scan'
 
-description: 'Add description here'
+description: 'Uses the Checkmarx CLI to execute a scan.'
 inputs:
-  input-1:
-    description: 'Add a description here'
+  checkmarx-server-url:
+    description: 'The Checkmarx Server URL.'
     required: true
-  input-2:
-    description: 'Add a description here'
+  checkmarx-username:
+    description: 'The Checkmarx username.'
+    required: true
+  checkmarx-password:
+    description: 'The Checkmarx password.'
+    required: true
+  team:
+    description: 'The Checkmarx Team that owns the project.'
+    required: true
+  project:
+    description: 'The project the scan is for.'
+    required: true
+  report-name:
+    description: 'Name of the pdf report to be generated.  Defaults to CheckmarxSASTResults.pdf.'
+    required: true
+    default: 'CheckmarxSASTResults.pdf'
+  sast-high:
+    description: 'The maximum number of High Vulnerabilities.'
+    required: true
+    default: '0'
+  sast-medium:
+    description: 'The maximum number of Medium Vulnerabilities.'
+    required: true
+    default: '4'
+  sast-low:
+    description: 'The maximum number of Low Vulnerabilities.'
+    required: true
+    default: '11'
+  break-build:
+    description: 'Flag indicating whether the build should break if any vulnerability threshold is exceeded.  Defaults to true.'
     required: false
+    default: 'true'
+  comment:
+    description: 'Comment to add to the scan (shown in Checkmarx Portal).  Defaults to "<WorkflowName> run #<RunNumber> on branch <branch>.'
+    required: false
+  exclude-paths:
+    description: 'Comma separated list of file or folder name patterns that will be appended to the default list of patterns to exclude.'
+    required: false
+  checkmarx-cli-version:
+    description: 'The Checkmarx CLI version.  Defaults to 1.1.5.'
+    required: true
+    default: 1.1.5
+
+outputs:
+  report-path:
+    description: 'The path to the generated pdf report.'
+    value: './${{ inputs.report-name }}'
+  high-vulnerabilities:
+    description: 'The number of High severity vulnerabilities reported'
+    value: ${{ steps.capture.outputs.HIGH }}
+  medium-vulnerabilities:
+    description: 'The number of Medium severity vulnerabilities reported'
+    value: ${{ steps.capture.outputs.MED }}
+  low-vulnerabilities:
+    description: 'The number of Low severity vulnerabilities reported'
+    value: ${{ steps.capture.outputs.LOW }}
+  info-vulnerabilities:
+    description: 'The number of Info severity vulnerabilities reported'
+    value: ${{ steps.capture.outputs.INFO }}
+  results-location:
+    description: 'The url to the results location'
+    value: ${{ steps.capture.outputs.URL }}
+
 runs:
-  using: 'node12'
-  main: 'dist/index.js'
+  using: 'composite'
+  steps:
+    - name: Download checkmarx
+      shell: bash
+      run: |
+        echo "::group::Downloading the Checkmarx CLI into the ./cx-cli directory"
+        curl -LO "https://download.checkmarx.com/9.3.0GA/Plugins/CxConsolePlugin-${{ inputs.checkmarx-cli-version }}.zip"
+        unzip -qq "CxConsolePlugin-${{ inputs.checkmarx-cli-version }}.zip" -d cx-cli
+        rm -f "CxConsolePlugin-${{ inputs.checkmarx-cli-version }}.zip"
+        echo "Download complete.  The current directory should now contain a cx-cli folder:"
+        ls
+        echo "::endgroup::"
+
+    - name: Setup Files and Folders to Exclude
+      shell: bash
+      run: |
+        echo "::group::Setting the files and folders to exclude from the scan"
+        base="!**/_cvs/**/*,!**/.bzr/**/*,!**/.git/**/*,!**/.github/**/*,!**/.hg/**/*,!**/.idea/**/*,!**/.svn/**/*,!**/.vscode/**/*,!**/*Tests*/**/*,!**/backup/**/*,!**/build/**/*,!**/bin/**/*,!**/coverage-results/**/*,!**/node_modules/**/*,!**/obj/**/*,!**/devserver.js,!**/.gitignore,!**/webpack.config.js,!**/*.3g2,!**/*.3gp,!**/*.7z,!**/*.aac,!**/*.ahtm,!**/*.ahtml,!**/*.aif,!**/*.asf,!**/*.asx,!**/*.avi,!**/*.bak,!**/*.bmp,!**/*.class,!**/*.dll,!**/*.DS_Store,!**/*.ear,!**/*.exe,!**/*.fhtml,!**/*.flv,!**/*.gif,!**/*.gz,!**/*.hdm,!**/*.hdml,!**/*.hsql,!**/*.ht,!**/*.hta,!**/*.htc,!**/*.htd,!**/*.htmls,!**/*.iff,!**/*.ihtml,!**/*.iml,!**/*.ipr,!**/*.iws,!**/*.jar,!**/*.jpg,!**/*.m3u,!**/*.mht,!**/*.mhtm,!**/*.mhtml,!**/*.mid,!**/*.mov,!**/*.mp3,!**/*.mp4,!**/*.mpa,!**/*.mpg,!**/*.pdb,!**/*.png,!**/*.psd,!**/*.ra,!**/*.rar,!**/*.rm,!**/*.ssi,!**/*.stm,!**/*.stml,!**/*.swf,!**/*.swf,!**/*.tar,!**/*.tar.gz,!**/*.tif,!**/*.tmp,!**/*.ttml,!**/*.txn,!**/*.vob,!**/*.war,!**/*.wav,!**/*.wma,!**/*.wmv,!**/*.xhtm,!**/*.xhtml,!**/*.zip"
+        additional="${{inputs.exclude-paths}}"
+
+        if [ -z "$additional" ]
+        then
+          echo "No additional exclude patterns were included, use the default"
+          exclude="${base}"
+        else
+          echo "Additional exclude paths were included: $additional"
+          exclude="${base},${additional}"
+        fi
+        echo "Exclude patterns:"
+        echo "$exclude"
+
+        echo "EXCLUDE=$exclude" >> $GITHUB_ENV
+        echo "::endgroup::"
+
+    - name: Set up Comment
+      shell: bash
+      run: |
+        echo "::group::Setting the comment to add to the scan"
+        inputComment="${{inputs.comment}}"
+
+        if [ -z "$inputComment" ]
+        then
+          echo "A custom comment was not provided, use the default"
+          comment="${{github.workflow}} run #${{ github.run_number }} on branch ${{ github.ref }}"
+        else
+          echo "A custom comment will be added to the scan: '${{ inputs.comment }}"
+          comment="$inputComment"
+        fi
+
+        echo "Scan Comment: $comment"
+        echo "COMMENT=$comment" >> $GITHUB_ENV
+        echo "::endgroup::"
+
+    - name: Set up ProjectName
+      shell: bash
+      run: |
+        echo "::group::Setting the project name for the scan"
+        projectName="${{ inputs.team }}\\${{ inputs.project }}"
+        echo "ProjectName: $projectName"
+        echo "PROJECT_NAME=$projectName" >> $GITHUB_ENV
+        echo "::endgroup::"
+
+    - name: Run Checkmarx
+      shell: bash
+      working-directory: ./cx-cli
+      run: |
+        echo "::group::Invoke the CLI"
+        echo "The cx-cli working directory is: "
+        ls
+
+        echo "The root working directory is:"
+        ls ${{github.workspace}}
+
+        ./runCxConsole.sh Scan \
+          -v \
+          -CxServer ${{ inputs.checkmarx-server-url }} \
+          -CxUser ${{ inputs.checkmarx-username }} \
+          -CxPassword ${{ inputs.checkmarx-password }} \
+          -ProjectName "${{ env.PROJECT_NAME }}" \
+          -ReportPDF "${{ inputs.report-name }}" \
+          -LocationType folder \
+          -LocationPath "${{ github.workspace }}" \
+          -LocationFilesExclude "${{ env.EXCLUDE }}" \
+          -Comment "${{ env.COMMENT }}"
+        echo "The checkmarx cli ended with code: $?"
+        echo "::endgroup::"
+
+    - name: Capture the results
+      id: capture
+      shell: bash
+      run: |
+        cxlog=`cat ./cx-cli/logs/cx_console.log`
+
+        high=$(echo $cxlog | grep -ioP 'High severity results: \K(\d{1,4})')
+        med=$(echo $cxlog | grep -ioP 'Medium severity results: \K(\d{1,4})')
+        low=$(echo $cxlog | grep -ioP 'Low severity results: \K(\d{1,4})')
+        info=$(echo $cxlog | grep -ioP 'Information severity results: \K(\d{1,4})')
+        url=$(echo $cxlog | grep -ioP 'Scan results location: \K(https:+[^\s]+[\w])')
+
+        echo "::set-output name=HIGH::$(echo $high)"
+        echo "::set-output name=MED::$(echo $med)"
+        echo "::set-output name=LOW::$(echo $low)"
+        echo "::set-output name=INFO::$(echo $info)"
+        echo "::set-output name=URL::$(echo $url)"
+
+    - name: Move Report to Root
+      shell: bash
+      run: |
+        echo "::group::Move the report to the root and delete cx-cli"
+        echo "Moving the report to the root..."
+        mv ./cx-cli/Checkmarx/Reports/${{ inputs.report-name }} ./${{ inputs.report-name }}
+        echo "Report moved"
+
+        echo "Remove the cx-cli directory..."
+        rm -r ./cx-cli
+
+        echo "The root directory contents:"
+        ls
+
+        echo "::endgroup::"
+
+    - name: Print results & fail if necessary
+      shell: bash
+      run: |
+        expectedHigh=${{inputs.sast-high}}
+        expectedMed=${{inputs.sast-medium}}
+        expectedLow=${{inputs.sast-low}}
+
+        actualHigh=${{steps.capture.outputs.HIGH}}
+        actualMed=${{steps.capture.outputs.MED}}
+        actualLow=${{steps.capture.outputs.LOW}}
+         
+        RED='\033[0;31m'
+        GREEN='\033[0;32m'
+        NC='\033[0m'
+        exitCode=0
+           
+        if [ $actualLow -gt $expectedLow ]
+        then
+          echo -e "${RED}Low Severity Vulnerabilities: $actualLow/$expectedLow"
+          exitCode=12
+        else
+          echo -e "${GREEN}Low Severity Vulnerabilities: $actualLow/$expectedLow"
+        fi
+
+        if [ $actualMed -gt $expectedMed ]
+        then
+          echo -e "${RED}Medium Severity Vulnerabilities: $actualMed/$expectedMed"
+          exitCode=11
+        else
+          echo -e "${GREEN}Medium Severity Vulnerabilities: $actualMed/$expectedMed"
+        fi
+
+        if [ $actualHigh -gt $expectedHigh ]
+        then
+          echo -e "${RED}High Severity Vulnerabilities: $actualHigh/$expectedHigh"
+          exitCode=10
+        else
+          echo -e "${GREEN}High Severity Vulnerabilities: $actualHigh/$expectedHigh"
+        fi
+
+        echo -e "${GREEN}Checkmarx Scan: ${{ steps.capture.outputs.URL }}${NC}"
+
+        if [ ${{inputs.break-build}} == 'true' ]
+        then
+          exit $exitCode
+        else
+          echo "If 'break-build' was true, this build would have failed."
+        fi
